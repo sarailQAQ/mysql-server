@@ -1,0 +1,9 @@
+{
+    "cmake.buildBeforeRun": true,
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "cmake.configureSettings": {
+        "WITH_DEBUG": "1",
+        "CMAKE_INSTALL_PREFIX": "${workspaceFolder}/target",
+    },
+    "git.ignoreLimitWarning": true
+}

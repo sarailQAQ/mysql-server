@@ -13,10 +13,9 @@ TAGS_sorted_by_file
 [._]ss[a-gi-z]
 [._]sw[a-p]
 
-# Configuration files for Visual Studio Code
-.vscode/
 
 build/
+cmake-build*
 datatool/
 datatools/
 __pycache__/
@@ -28,4 +27,6 @@ scalability_jobs_*
 .cproject
 .project
 .settings/
+
+.cache/
 
