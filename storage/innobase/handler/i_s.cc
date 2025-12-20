@@ -39,8 +39,15 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <sql_time.h>
 #include <sys/types.h>
 #include <time.h>
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "auth_acls.h"
 #include "btr0btr.h"
@@ -72,6 +79,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0tmp.h"
 #include "trx0i_s.h"
 #include "trx0trx.h"
+#include "ut0dbg.h"
 #include "ut0new.h"
 
 #include "my_dbug.h"
@@ -4109,6 +4117,173 @@ struct st_mysql_plugin i_s_innodb_buffer_stats = {
     /* the function to invoke when plugin is loaded */
     /* int (*)(void*); */
     STRUCT_FLD(init, i_s_innodb_buffer_pool_stats_init),
+
+    /* the function to invoke when plugin is un installed */
+    /* int (*)(void*); */
+    STRUCT_FLD(check_uninstall, nullptr),
+
+    /* the function to invoke when plugin is unloaded */
+    /* int (*)(void*); */
+    STRUCT_FLD(deinit, i_s_common_deinit),
+
+    /* plugin version (for SHOW PLUGINS) */
+    /* unsigned int */
+    STRUCT_FLD(version, i_s_innodb_plugin_version),
+
+    /* SHOW_VAR* */
+    STRUCT_FLD(status_vars, nullptr),
+
+    /* SYS_VAR** */
+    STRUCT_FLD(system_vars, nullptr),
+
+    /* reserved for dependency checking */
+    /* void* */
+    STRUCT_FLD(__reserved1, nullptr),
+
+    /* Plugin flags */
+    /* unsigned long */
+    STRUCT_FLD(flags, 0UL),
+};
+
+static ST_FIELD_INFO i_s_innodb_buffer_page_trace_fields_info[] = {
+#define IDX_BUF_PAGE_TRACE_POOL_ID 0
+    {STRUCT_FLD(field_name, "POOL_ID"),
+     STRUCT_FLD(field_length, MY_INT64_NUM_DECIMAL_DIGITS),
+     STRUCT_FLD(field_type, MYSQL_TYPE_LONGLONG), STRUCT_FLD(value, 0),
+     STRUCT_FLD(field_flags, MY_I_S_UNSIGNED), STRUCT_FLD(old_name, ""),
+     STRUCT_FLD(open_method, 0)},
+
+#define IDX_BUF_PAGE_TRACE_SPACE_ID 1
+     {STRUCT_FLD(field_name, "SPACE_ID"),
+     STRUCT_FLD(field_length, MY_INT64_NUM_DECIMAL_DIGITS),
+     STRUCT_FLD(field_type, MYSQL_TYPE_LONGLONG), STRUCT_FLD(value, 0),
+     STRUCT_FLD(field_flags, MY_I_S_UNSIGNED), STRUCT_FLD(old_name, ""),
+     STRUCT_FLD(open_method, 0)},
+
+#define IDX_BUF_PAGE_TRACE_PAGE_NO 2
+     {STRUCT_FLD(field_name, "PAGE_NO"),
+     STRUCT_FLD(field_length, MY_INT64_NUM_DECIMAL_DIGITS),
+     STRUCT_FLD(field_type, MYSQL_TYPE_LONGLONG), STRUCT_FLD(value, 0),
+     STRUCT_FLD(field_flags, MY_I_S_UNSIGNED), STRUCT_FLD(old_name, ""),
+     STRUCT_FLD(open_method, 0)},
+
+#define IDX_BUF_PAGE_TRACE_ACCESS_COUNT 3
+     {STRUCT_FLD(field_name, "ACCESS_COUNT"),
+     STRUCT_FLD(field_length, MY_INT64_NUM_DECIMAL_DIGITS),
+     STRUCT_FLD(field_type, MYSQL_TYPE_LONGLONG), STRUCT_FLD(value, 0),
+     STRUCT_FLD(field_flags, MY_I_S_UNSIGNED), STRUCT_FLD(old_name, ""),
+     STRUCT_FLD(open_method, 0)},
+
+#define IDX_BUF_PAGE_TRACE_UPDATE_COUNT 4
+     {STRUCT_FLD(field_name, "UPDATE_COUNT"),
+     STRUCT_FLD(field_length, MY_INT64_NUM_DECIMAL_DIGITS),
+     STRUCT_FLD(field_type, MYSQL_TYPE_LONGLONG), STRUCT_FLD(value, 0),
+     STRUCT_FLD(field_flags, MY_I_S_UNSIGNED), STRUCT_FLD(old_name, ""),
+     STRUCT_FLD(open_method, 0)},
+};
+
+static std::vector<std::array<uint64_t, 4>> i_s_page_trace_scan(ulint pool_id) {
+  std::vector<std::array<uint64_t, 4>> page_trace;
+  buf_pool_t *buf_pool = buf_pool_from_array(pool_id);
+
+  std::lock_guard lock(buf_pool->page_trace_mutex);
+
+  auto &trace_map = buf_pool->page_trace_map;
+  page_trace.reserve(trace_map.size());
+  for (auto [id, pair] : trace_map) {
+    uint64_t space_id = id >> 32;
+    uint64_t page_no = id % (1LL << 32);
+    uint64_t access_count = pair.first;
+    uint64_t update_count = pair.second;
+    std::array<uint64_t, 4> trace_recod = {space_id, page_no, access_count, update_count};
+    page_trace.emplace_back(trace_recod);
+  }
+  return page_trace;
+}
+
+static int i_s_innodb_buffer_page_trace_fill_table(
+    THD *thd,          /*!< in: thread */
+    Table_ref *tables, /*!< in/out: tables to fill */
+    Item *)            /*!< in: condition (ignored) */ 
+{
+  int status = 0;
+  TABLE *table;
+  Field **fields;
+
+  DBUG_TRACE;
+
+  table = tables->table;
+
+  fields = table->field;
+
+  /* stop page trace */
+  buf_page_trace.store(false, std::memory_order_release);
+
+  /* Walk through each buffer pool */
+  for (ulint i = 0; i < srv_buf_pool_instances; i++) {
+    auto trace_records = i_s_page_trace_scan(i);
+    for (const auto &record : trace_records) {
+      OK(fields[IDX_BUF_PAGE_TRACE_POOL_ID]->store(i, true));
+      OK(fields[IDX_BUF_PAGE_TRACE_SPACE_ID]->store(record[0], true));
+      OK(fields[IDX_BUF_PAGE_TRACE_PAGE_NO]->store(record[1], true));
+      OK(fields[IDX_BUF_PAGE_TRACE_ACCESS_COUNT]->store(record[2], true));
+      OK(fields[IDX_BUF_PAGE_TRACE_UPDATE_COUNT]->store(record[3], true));
+      status = schema_table_store_record(thd, table);
+      if (status || thd->killed) {
+        return 1;
+      }
+    }
+  }
+
+  /* restore page trace */
+  buf_page_trace.store(innodb_trace_page_access);
+  return 0;
+}
+
+static int i_s_innodb_buffer_page_trace_init(
+    void *p) /*!< in/out: table schema object */
+{
+  ST_SCHEMA_TABLE *schema;
+
+  DBUG_TRACE;
+
+  schema = reinterpret_cast<ST_SCHEMA_TABLE *>(p);
+
+  schema->fields_info = i_s_innodb_buffer_page_trace_fields_info;
+  schema->fill_table = i_s_innodb_buffer_page_trace_fill_table;
+
+  return 0;
+}
+
+
+struct st_mysql_plugin i_s_innodb_buffer_page_trace {
+      /* the plugin type (a MYSQL_XXX_PLUGIN value) */
+    /* int */
+    STRUCT_FLD(type, MYSQL_INFORMATION_SCHEMA_PLUGIN),
+
+    /* pointer to type-specific plugin descriptor */
+    /* void* */
+    STRUCT_FLD(info, &i_s_info),
+
+    /* plugin name */
+    /* const char* */
+    STRUCT_FLD(name, "INNODB_BUFFER_PAGE_TRACE"),
+
+    /* plugin author (for SHOW PLUGINS) */
+    /* const char* */
+    STRUCT_FLD(author, "sarail"),
+
+    /* general descriptive text (for SHOW PLUGINS) */
+    /* const char* */
+    STRUCT_FLD(descr, "InnoDB Buffer Page Trace Result "),
+
+    /* the plugin license (PLUGIN_LICENSE_XXX) */
+    /* int */
+    STRUCT_FLD(license, PLUGIN_LICENSE_GPL),
+
+    /* the function to invoke when plugin is loaded */
+    /* int (*)(void*); */
+    STRUCT_FLD(init, i_s_innodb_buffer_page_trace_init),
 
     /* the function to invoke when plugin is un installed */
     /* int (*)(void*); */

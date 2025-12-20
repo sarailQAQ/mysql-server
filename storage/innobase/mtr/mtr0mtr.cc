@@ -32,12 +32,14 @@ this program; if not, write to the Free Software Foundation, Inc.,
  *******************************************************/
 
 #include "mtr0mtr.h"
+#include <atomic>
 
 #include "buf0buf.h"
 #include "buf0flu.h"
 #include "clone0api.h"
 #include "fsp0sysspace.h"
 #include "log0meb.h"
+#include "srv0srv.h"
 #ifndef UNIV_HOTBACKUP
 #include "clone0clone.h"
 #include "log0buf.h"
@@ -248,7 +250,9 @@ static void memo_slot_release(mtr_memo_slot_t *slot) {
     case MTR_MEMO_PAGE_X_FIX:
 #ifndef UNIV_HOTBACKUP
       block = reinterpret_cast<buf_block_t *>(slot->object);
-
+      if (buf_page_trace.load(std::memory_order_relaxed)) {
+        buf_page_access_count(block->page);
+      }
       buf_page_release_latch(block, slot->type);
       /* The buf_page_release_latch(block,..) call was last action dereferencing
       the `block`, so we can unfix the `block` now, but not sooner.*/

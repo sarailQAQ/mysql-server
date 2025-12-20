@@ -34,6 +34,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef buf0buf_h
 #define buf0buf_h
 
+#include <absl/container/flat_hash_map.h>
 #include "buf0types.h"
 #include "fil0fil.h"
 #include "hash0hash.h"
@@ -48,7 +49,11 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "buf/buf.h"
 
+#include <cstdint>
+#include <mutex>
 #include <ostream>
+#include <unordered_map>
+#include <utility>
 
 // Forward declaration
 struct fil_addr_t;
@@ -123,6 +128,10 @@ extern buf_block_t *back_block1;
 /** second block, for page reorganize */
 extern buf_block_t *back_block2;
 #endif /* UNIV_HOTBACKUP */
+
+/* system variable, to start or stop page trace*/
+extern bool innodb_trace_page_access;
+extern std::atomic_bool buf_page_trace;
 
 /** @brief States of a control block
 @see buf_page_t
@@ -2366,6 +2375,10 @@ struct buf_pool_t {
   buddy system, indexed by block->frame */
   hash_table_t *zip_hash;
 
+  std::mutex page_trace_mutex;
+
+  std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> page_trace_map;
+
   /** Number of pending read operations. Accessed atomically */
   std::atomic<ulint> n_pend_reads;
 
@@ -2818,6 +2831,24 @@ inline void buf_block_reset_page_type_on_mismatch(buf_block_t &block,
     fil_page_reset_type(page_id, page, type, &mtr);
   }
 }
+
+inline void buf_page_access_count(const buf_page_t &bpage) {
+  buf_pool_t *buf_pool = buf_pool_from_bpage(&bpage);
+  auto& trace_map = buf_pool->page_trace_map;
+  uint64_t page_id = bpage.id.cast_u64();
+  std::lock_guard lock(buf_pool->page_trace_mutex);
+
+  auto it = trace_map.find(page_id);
+  if (it == trace_map.end()) {
+    trace_map.insert(std::make_pair(page_id, std::make_pair(1, bpage.is_dirty() ? 1 : 0)));
+    return;
+  }
+  auto &pair = it->second;
+  pair.first += 1;
+  pair.second += bpage.is_dirty() ? 1 : 0;
+}
+
+void innodb_trace_page_access_update(THD *, SYS_VAR *, void *, const void *save);
 
 #include "buf0buf.ic"
 

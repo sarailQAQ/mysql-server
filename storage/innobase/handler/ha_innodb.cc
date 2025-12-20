@@ -63,6 +63,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <time.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -88,6 +89,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "arch0arch.h"
 #include "arch0page.h"
 #include "auth_acls.h"
+#include "buf0buf.h"
 #include "btr0btr.h"
 #include "btr0cur.h"
 #include "btr0sea.h"
@@ -636,16 +638,16 @@ const struct _ft_vft_ext ft_vft_ext_result = {
 
 #ifdef HAVE_PSI_INTERFACE
 #define PSI_KEY(n, flag, volatility, doc) \
-  { &(n##_key.m_value), #n, flag, volatility, doc }
+  {&(n##_key.m_value), #n, flag, volatility, doc}
 #define PSI_MEMORY_KEY(n, flag, volatility, doc) \
-  { &(n##_key), #n, flag, volatility, doc }
+  {&(n##_key), #n, flag, volatility, doc}
 #define PSI_MUTEX_KEY(n, flag, volatility, doc) \
-  { &(n##_key.m_value), #n, flag, volatility, doc }
+  {&(n##_key.m_value), #n, flag, volatility, doc}
 /* All RWLOCK used in Innodb are SX-locks */
 #define PSI_RWLOCK_KEY(n, volatility, doc) \
-  { &n##_key.m_value, #n, PSI_FLAG_RWLOCK_SX, volatility, doc }
+  {&n##_key.m_value, #n, PSI_FLAG_RWLOCK_SX, volatility, doc}
 #define PSI_THREAD_KEY(n, osn, flag, volatility, doc) \
-  { &(n##_key.m_value), #n, osn, flag, volatility, doc }
+  {&(n##_key.m_value), #n, osn, flag, volatility, doc}
 
 /* Keys to register pthread mutexes/cond in the current file with
 performance schema */
@@ -23424,6 +23426,10 @@ char **thd_innodb_interpreter(THD *thd) {
       .resolve(thd, MYSQL_SYSVAR_NAME(interpreter).offset);
 }
 #endif /* UNIV_DEBUG */
+static MYSQL_SYSVAR_BOOL(trace_page_access, innodb_trace_page_access,
+                         PLUGIN_VAR_OPCMDARG,
+                         "Enable innodb page access trace.", nullptr,
+                         innodb_trace_page_access_update, false);
 
 static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(api_trx_level),
@@ -23645,6 +23651,7 @@ static SYS_VAR *innobase_system_variables[] = {
 #endif /* UNIV_DEBUG */
     MYSQL_SYSVAR(parallel_read_threads),
     MYSQL_SYSVAR(segment_reserve_factor),
+    MYSQL_SYSVAR(trace_page_access),
     nullptr};
 
 mysql_declare_plugin(innobase){
@@ -23666,7 +23673,7 @@ mysql_declare_plugin(innobase){
     i_s_innodb_trx, i_s_innodb_cmp, i_s_innodb_cmp_reset, i_s_innodb_cmpmem,
     i_s_innodb_cmpmem_reset, i_s_innodb_cmp_per_index,
     i_s_innodb_cmp_per_index_reset, i_s_innodb_buffer_page,
-    i_s_innodb_buffer_page_lru, i_s_innodb_buffer_stats,
+    i_s_innodb_buffer_page_lru, i_s_innodb_buffer_stats, i_s_innodb_buffer_page_trace,
     i_s_innodb_temp_table_info, i_s_innodb_metrics,
     i_s_innodb_ft_default_stopword, i_s_innodb_ft_deleted,
     i_s_innodb_ft_being_deleted, i_s_innodb_ft_config,

@@ -60,6 +60,7 @@
 #include "mysqld_error.h"
 #include "sql-common/my_decimal.h"
 #include "sql/item.h"
+#include "sql/item_bfp_func.h"
 #include "sql/item_cmpfunc.h"  // Item_func_any_value
 #include "sql/item_func.h"     // Item_func_udf_str
 #include "sql/item_geofunc.h"  // Item_func_st_area
@@ -1787,7 +1788,10 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"INTERNAL_USE_TERMINOLOGY_PREVIOUS",
      SQL_FN_INTERNAL(Item_func_internal_use_terminology_previous, 0)},
     {"INTERNAL_IS_ENABLED_ROLE",
-     SQL_FN_INTERNAL(Item_func_internal_is_enabled_role, 2)}};
+     SQL_FN_INTERNAL(Item_func_internal_is_enabled_role, 2)},
+    {"START_BFP_COUNT", SQL_FN(Item_func_start_bfp_count, 0)},
+    {"END_BFP_COUNT", SQL_FN(Item_func_end_bfp_count, 0)}
+    };
 
 using Native_functions_hash = std::unordered_map<std::string, Create_func *>;
 static const Native_functions_hash *native_functions_hash;

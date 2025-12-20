@@ -42,6 +42,10 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "btr0btr.h"
 #include "buf0buf.h"
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <mutex>
 #include "fil0fil.h"
 #include "fsp0sysspace.h"
 #include "ha_prototypes.h"
@@ -338,6 +342,40 @@ static ulint buf_dbg_counter = 0;
 with small buffer pool size. */
 bool srv_buf_pool_debug;
 #endif /* UNIV_DEBUG */
+
+bool innodb_trace_page_access = false;
+
+std::atomic_bool buf_page_trace = false;
+
+void innodb_trace_page_access_update(THD *, SYS_VAR *, void *, const void *save) {
+  const bool trace_page = *static_cast<const bool *>(save);
+  if (innodb_trace_page_access == trace_page) {
+    return;
+  }
+
+  auto clear_trace_maps = []() {
+    for (ulong i = 0; i < srv_buf_pool_instances; i++) {
+      buf_pool_t *buf_pool = buf_pool_from_array(i);
+      std::lock_guard lock(buf_pool->page_trace_mutex);
+      buf_pool->page_trace_map.clear();
+    }
+  };
+
+  if (trace_page) {
+    /* clear cached result before setting buf_page_trace */
+    clear_trace_maps();
+  }
+
+  innodb_trace_page_access = trace_page;
+  fprintf(stderr, "sysvar innodb_trace_page_access set to %d.", static_cast<int>(trace_page));
+  buf_page_trace.store(innodb_trace_page_access, std::memory_order_release);
+
+  if (!trace_page) {
+    /* clear cached result after setting buf_page_trace */
+    /* it won`t hinder other sessions */
+    clear_trace_maps();
+  }
+}
 
 namespace {
 #ifndef UNIV_HOTBACKUP
@@ -1417,6 +1455,9 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
 
   /* Initialize the iterator for single page scan search */
   new (&buf_pool->single_scan_itr) LRUItr(buf_pool, &buf_pool->LRU_list_mutex);
+
+  new (&buf_pool->page_trace_map) std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>>();
+  new (&buf_pool->page_trace_mutex) std::mutex();
 
   err = DB_SUCCESS;
 }

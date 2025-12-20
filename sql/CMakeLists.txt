@@ -403,6 +403,7 @@ SET(SQL_SHARED_SOURCES
   item_strfunc.cc
   item_subselect.cc
   item_sum.cc
+  item_bfp_func.cc
   window.cc
   item_timefunc.cc
   item_xmlfunc.cc

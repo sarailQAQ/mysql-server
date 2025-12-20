@@ -34,6 +34,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef buf0types_h
 #define buf0types_h
 
+#include <cstdint>
 #include "os0event.h"
 #include "sync0rw.h"
 #include "ut0byte.h"
@@ -247,6 +248,13 @@ class page_id_t {
   inline uint64_t hash() const {
     constexpr uint64_t HASH_MASK = 1653893711;
     return (((uint64_t)m_space << 20) + m_space + m_page_no) ^ HASH_MASK;
+  }
+
+  /** Compact m_space and m_page_no.
+  @return compact value */
+  inline uint64_t cast_u64() const {
+    return static_cast<uint64_t>(m_space) << 32 | 
+            static_cast<uint64_t>(m_page_no);
   }
 
   /** Reset the values from a (space, page_no).

@@ -54,6 +54,7 @@ extern struct st_mysql_plugin i_s_innodb_ft_config;
 extern struct st_mysql_plugin i_s_innodb_buffer_page;
 extern struct st_mysql_plugin i_s_innodb_buffer_page_lru;
 extern struct st_mysql_plugin i_s_innodb_buffer_stats;
+extern struct st_mysql_plugin i_s_innodb_buffer_page_trace;
 extern struct st_mysql_plugin i_s_innodb_temp_table_info;
 extern struct st_mysql_plugin i_s_innodb_tables;
 extern struct st_mysql_plugin i_s_innodb_tablestats;
