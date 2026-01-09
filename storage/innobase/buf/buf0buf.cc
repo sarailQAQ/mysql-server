@@ -4159,7 +4159,7 @@ void Buf_fetch<T>::read_page() {
     IO when the process is already being parallelized on higher level of
     abstraction. */
     if (m_mode != Page_fetch::SCAN) {
-      buf_read_ahead_random(m_page_id, m_page_size, ibuf_inside(m_mtr));
+     /* buf_read_ahead_random(m_page_id, m_page_size, ibuf_inside(m_mtr)); */
     }
     m_retries = 0;
   } else if (m_retries < BUF_PAGE_READ_MAX_RETRIES) {

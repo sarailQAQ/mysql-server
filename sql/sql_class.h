@@ -38,6 +38,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <cstddef>
 #ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
 #endif
@@ -4877,6 +4878,10 @@ class THD : public MDL_context_owner,
     defined behaviour when they aren't.
   */
   size_t m_opened_temptable_count{};
+  
+#ifdef HAVE_LIBNUMA
+  size_t thread_node;
+#endif
 };
 
 /**

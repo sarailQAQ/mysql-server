@@ -860,6 +860,11 @@ THD::THD(bool enable_plugins)
   if (events_cache_ == nullptr || !events_cache_->valid()) {
     /*ToDo: Raise warning */
   }
+
+#ifdef HAVE_LIBNUMA
+  // MYTODO use num node
+  thread_node = m_thread_id % 2;
+#endif
 }
 
 void THD::store_cached_properties(cached_properties prop_mask) {
