@@ -48,6 +48,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "buf/buf.h"
 
+#include <atomic>
+#include <bitset>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <ostream>
@@ -118,6 +121,10 @@ constexpr ulint MAX_BUFFER_POOLS = (1 << MAX_BUFFER_POOLS_BITS);
 /** The maximum number of page_hash locks */
 constexpr ulint MAX_PAGE_HASH_LOCKS = 1024;
 
+constexpr int DEFAULT_NUMA_NODE = 0;
+
+constexpr int MAX_SUPPORT_NUMA_NODES = 8;
+
 /** The buffer pools of the database */
 extern buf_pool_t *buf_pool_ptr;
 
@@ -131,6 +138,8 @@ extern buf_block_t *back_block2;
 /* system variable, to start or stop page trace*/
 extern bool innodb_trace_page_access;
 extern std::atomic_bool buf_page_trace;
+
+extern thread_local int thread_numa_node;
 
 /** @brief States of a control block
 @see buf_page_t
@@ -1607,6 +1616,8 @@ class buf_page_t {
   /** Block state. @see buf_page_in_file */
   buf_page_state state;
 
+  bool page_shred;
+
   /** If this block is currently being flushed to disk, this tells
   the flush_type.  @see buf_flush_t */
   buf_flush_t flush_type;
@@ -1740,6 +1751,9 @@ class buf_page_t {
   @return same output stream */
   friend std::ostream &operator<<(std::ostream &outs, const buf_page_t &page);
 #endif /* !UNIV_HOTBACKUP */
+
+  std::atomic_uint64_t access_count;
+  std::atomic_uint64_t write_access_count;
 };
 
 /** Structure used by AHI to contain information on record prefixes to be
@@ -1790,9 +1804,42 @@ struct buf_block_t {
 
 #endif /* UNIV_HOTBACKUP */
 
+  struct proxy_frame_t {
+   public:
+    proxy_frame_t(buf_block_t *this_) : this_(this_) {
+    }
+
+    operator buf_frame_t*() const {
+      return this_->real_frame.load();
+    }
+
+    // operator void *() const {
+    //   return this_->real_frame.load();
+    // }
+
+    proxy_frame_t &operator+=(const size_t sz) {
+      this_->real_frame.fetch_add(sz);
+      return *this;
+    }
+
+    proxy_frame_t &operator=(buf_frame_t *real_frame) {
+      this_->real_frame.store(real_frame);
+      return *this;
+    }
+
+   private:
+    buf_block_t *this_;
+  };
+
+  proxy_frame_t frame{this};
   /** pointer to buffer frame which is of size UNIV_PAGE_SIZE, and aligned
   to an address divisible by UNIV_PAGE_SIZE */
-  byte *frame;
+  std::atomic<buf_frame_t *> real_frame;
+
+  buf_frame_t *shared_pages[MAX_SUPPORT_NUMA_NODES];
+  std::bitset<MAX_SUPPORT_NUMA_NODES> shared_pages_mask;
+
+  int frame_position;
 
   /** node of the decompressed LRU list; a block is in the unzip_LRU list if
   page.state == BUF_BLOCK_FILE_PAGE and page.zip.data != NULL. Protected by
@@ -2831,7 +2878,7 @@ inline void buf_block_reset_page_type_on_mismatch(buf_block_t &block,
   }
 }
 
-inline void buf_page_access_count(const buf_page_t &bpage) {
+inline void buf_page_access_count(const buf_page_t &bpage, bool modified) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(&bpage);
   auto& trace_map = buf_pool->page_trace_map;
   uint64_t page_id = bpage.id.cast_u64();
@@ -2839,12 +2886,22 @@ inline void buf_page_access_count(const buf_page_t &bpage) {
 
   auto it = trace_map.find(page_id);
   if (it == trace_map.end()) {
-    trace_map.insert(std::make_pair(page_id, std::make_pair(1, bpage.is_dirty() ? 1 : 0)));
+    trace_map.insert(std::make_pair(page_id, std::make_pair(1, modified ? 1 : 0)));
     return;
   }
   auto &pair = it->second;
   pair.first += 1;
-  pair.second += bpage.is_dirty() ? 1 : 0;
+  pair.second += modified ? 1 : 0;
+}
+
+inline void buf_page_release(buf_page_t &bpage, bool modified) {
+  if (buf_page_trace.load(std::memory_order_relaxed)) {
+    buf_page_access_count(bpage, modified);
+  }
+  bpage.access_count.fetch_add(1, std::memory_order_relaxed);
+  if (modified) {
+    bpage.write_access_count.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 void innodb_trace_page_access_update(THD *, SYS_VAR *, void *, const void *save);

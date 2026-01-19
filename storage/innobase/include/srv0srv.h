@@ -395,6 +395,8 @@ use simulated aio we build below with threads.
 Currently we support native aio on windows and linux */
 extern bool srv_use_native_aio;
 extern bool srv_numa_interleave;
+extern bool srv_numa_bind;
+extern bool srv_page_shared;
 
 /* The innodb_directories variable value. This a list of directories
 deliminated by ';', i.e the FIL_PATH_SEPARATOR. */

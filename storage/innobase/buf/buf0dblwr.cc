@@ -32,6 +32,7 @@ Atomic writes handling. */
 
 #include "buf0buf.h"
 #include "buf0checksum.h"
+#include "buf0types.h"
 #include "log0chkp.h"
 #include "os0enc.h"
 #include "os0thread-create.h"
@@ -1654,7 +1655,7 @@ dberr_t Double_write::sync_page_flush(buf_page_t *bpage,
   ut_d(auto page_id = bpage->id);
 
   if (dblwr::Force_crash == page_id) {
-    auto frame = reinterpret_cast<const buf_block_t *>(bpage)->frame;
+    buf_frame_t *frame = reinterpret_cast<const buf_block_t *>(bpage)->frame;
     const auto p = reinterpret_cast<byte *>(frame);
 
     ut_ad(page_get_space_id(p) == dblwr::Force_crash.space());

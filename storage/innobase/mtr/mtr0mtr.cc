@@ -39,6 +39,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "clone0api.h"
 #include "fsp0sysspace.h"
 #include "log0meb.h"
+#include "log0types.h"
+#include "mtr0types.h"
 #include "srv0srv.h"
 #ifndef UNIV_HOTBACKUP
 #include "clone0clone.h"
@@ -247,18 +249,22 @@ static void memo_slot_release(mtr_memo_slot_t *slot) {
     case MTR_MEMO_BUF_FIX:
     case MTR_MEMO_PAGE_S_FIX:
     case MTR_MEMO_PAGE_SX_FIX:
-    case MTR_MEMO_PAGE_X_FIX:
+    case MTR_MEMO_PAGE_X_FIX: {
 #ifndef UNIV_HOTBACKUP
       block = reinterpret_cast<buf_block_t *>(slot->object);
-      if (buf_page_trace.load(std::memory_order_relaxed)) {
-        buf_page_access_count(block->page);
-      }
+      bool modified = slot->type == MTR_MEMO_PAGE_X_FIX 
+                      || slot->type == MTR_MEMO_PAGE_SX_FIX
+                      || (slot->type == MTR_MEMO_BUF_FIX && 
+                          block->made_dirty_with_no_latch);
+      buf_page_release(block->page, modified);
+      
       buf_page_release_latch(block, slot->type);
       /* The buf_page_release_latch(block,..) call was last action dereferencing
       the `block`, so we can unfix the `block` now, but not sooner.*/
       buf_block_unfix(block);
 #endif /* !UNIV_HOTBACKUP */
       break;
+    }
 
     case MTR_MEMO_S_LOCK:
       rw_lock_s_unlock(reinterpret_cast<rw_lock_t *>(slot->object));

@@ -1337,6 +1337,10 @@ loop:
     return block;
   }
 
+#ifdef INNODB_IN_MEMORY
+  ib::fatal() << "No free blocks in the buffer pool under in-memory mode.";
+#endif
+
   MONITOR_INC(MONITOR_LRU_GET_FREE_LOOPS);
 
   freed = false;

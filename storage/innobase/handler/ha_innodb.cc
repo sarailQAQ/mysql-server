@@ -23159,6 +23159,18 @@ static MYSQL_SYSVAR_BOOL(
     PLUGIN_VAR_NOCMDARG | PLUGIN_VAR_READONLY,
     "Use NUMA interleave memory policy to allocate InnoDB buffer pool.",
     nullptr, nullptr, true);
+
+static MYSQL_SYSVAR_BOOL(
+    numa_bind, srv_numa_bind,
+    PLUGIN_VAR_NOCMDARG | PLUGIN_VAR_READONLY,
+    "Use NUMA bind memory policy to allocate InnoDB buffer pool.",
+    nullptr, nullptr, false);
+
+static MYSQL_SYSVAR_BOOL(
+    page_shared, srv_page_shared,
+    PLUGIN_VAR_NOCMDARG | PLUGIN_VAR_READONLY, 
+    "Enable page shared between numa nodes.", 
+    nullptr, nullptr, false);
 #endif /* HAVE_LIBNUMA */
 
 static MYSQL_SYSVAR_BOOL(
@@ -23576,6 +23588,8 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(use_native_aio),
 #ifdef HAVE_LIBNUMA
     MYSQL_SYSVAR(numa_interleave),
+    MYSQL_SYSVAR(numa_bind),
+    MYSQL_SYSVAR(page_shared),
 #endif /* HAVE_LIBNUMA */
     MYSQL_SYSVAR(change_buffering),
     MYSQL_SYSVAR(change_buffer_max_size),

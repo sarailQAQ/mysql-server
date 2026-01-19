@@ -46,6 +46,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "btr0cur.h"
 #include "btr0pcur.h"
 #include "buf0buf.h"
+#include "buf0types.h"
 #include "ha0ha.h"
 
 #include "page0cur.h"
@@ -1108,7 +1109,7 @@ void btr_search_drop_page_hash_index(buf_block_t *block, bool force) {
 
     ut_a(btr_search_get_n_fields(prefix_info) > 0);
 
-    auto page = block->frame;
+    buf_frame_t *page = block->frame;
     const auto n_recs = page_get_n_recs(page);
 
     /* Calculate and cache fold values into an array for fast deletion

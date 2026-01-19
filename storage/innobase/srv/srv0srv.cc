@@ -221,6 +221,10 @@ bool srv_use_native_aio = false;
 
 bool srv_numa_interleave = false;
 
+bool srv_numa_bind = false;
+
+bool srv_page_shared = false;
+
 #ifdef UNIV_DEBUG
 /** Force all user tables to use page compression. */
 ulong srv_debug_compress;

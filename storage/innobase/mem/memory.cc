@@ -296,7 +296,7 @@ mem_block_t *mem_heap_create_block(mem_heap_t *heap, ulint n,
       buf_block = buf_block_alloc(nullptr);
     }
 
-    block = (mem_block_t *)buf_block->frame;
+    block = (mem_block_t *)buf_block->real_frame.load();
   }
 
   if (block == nullptr) {

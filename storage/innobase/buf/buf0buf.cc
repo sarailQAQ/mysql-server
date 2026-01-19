@@ -38,6 +38,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
  Created 11/5/1995 Heikki Tuuri
  *******************************************************/
 
+#include "db0err.h"
+#include "my_compiler.h"
 #include "my_config.h"
 
 #include "btr0btr.h"
@@ -45,6 +47,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include "fil0fil.h"
 #include "fsp0sysspace.h"
@@ -52,6 +55,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "mem0mem.h"
 #include "my_dbug.h"
 #include "page0size.h"
+#include "univ.i"
+#include "ut0mutex.h"
 #ifndef UNIV_HOTBACKUP
 #include "btr0sea.h"
 #include "buf0buddy.h"
@@ -347,6 +352,8 @@ bool innodb_trace_page_access = false;
 
 std::atomic_bool buf_page_trace = false;
 
+thread_local int thread_numa_node = -1;
+
 void innodb_trace_page_access_update(THD *, SYS_VAR *, void *, const void *save) {
   const bool trace_page = *static_cast<const bool *>(save);
   if (innodb_trace_page_access == trace_page) {
@@ -378,6 +385,164 @@ void innodb_trace_page_access_update(THD *, SYS_VAR *, void *, const void *save)
 }
 
 namespace {
+
+static int get_current_cpu_numa_node() {
+    int cpu = sched_getcpu();
+    if (cpu < 0) {
+        return -1;
+    }
+
+    int node = numa_node_of_cpu(cpu);
+    if (node < 0) {
+        std::cerr << "Warning: Cannot determine NUMA node for CPU " << cpu << std::endl;
+        return -1;
+    }
+    return node;
+}
+
+static bool bind_thread_numa_once() {
+    if (likely(thread_numa_node != -1)) {
+        return true;
+    }
+
+    if (numa_available() < 0) {
+        return false;
+    }
+
+    int node = get_current_cpu_numa_node();
+    if (node < 0) {
+        std::cerr << "Failed to get current NUMA node." << std::endl;
+        return false;
+    }
+
+    struct bitmask* cpumask = numa_allocate_cpumask();
+    if (!cpumask) {
+        std::cerr << "Failed to allocate CPU mask." << std::endl;
+        return false;
+    }
+
+    if (numa_node_to_cpus(node, cpumask) != 0) {
+        std::cerr << "numa_node_to_cpus failed for node " << node << std::endl;
+        numa_free_cpumask(cpumask);
+        return false;
+    }
+
+    int ret = pthread_setaffinity_np(pthread_self(),
+                                      sizeof(cpu_set_t),
+                                      reinterpret_cast<cpu_set_t*>(cpumask->maskp));
+    numa_free_cpumask(cpumask);
+
+    if (ret != 0) {
+        std::cerr << "pthread_setaffinity_np failed: " << strerror(errno) << std::endl;
+        return false;
+    }
+
+    thread_numa_node = node;
+    return true;
+}
+
+static bool try_make_page_shared(buf_block_t *block) noexcept {
+#ifndef HAVE_LIBNUMA
+    return ret;
+#endif
+    ut_a(block);
+    ut_ad(srv_page_shared);
+
+    if (block->shared_pages[thread_numa_node] != nullptr) {
+      block->real_frame = block->shared_pages[thread_numa_node];
+      return true;
+    }
+
+    buf_page_t &page = block->page;
+    if (!page.page_shred) {
+      const uint64_t access_count = page.access_count.load(std::memory_order_acquire);
+      const uint64_t modify_count = page.write_access_count.load(std::memory_order_acquire);
+      if (access_count < 1000 || (modify_count * 100 > access_count)) {
+        return false;
+      }
+      page.page_shred = true;
+    }
+
+    ut_a(thread_numa_node < MAX_SUPPORT_NUMA_NODES);
+
+    if (thread_numa_node == block->frame_position) {
+      /* page is already shared and in using */
+      ut_ad(block->frame == block->shared_pages[thread_numa_node]
+            && block->shared_pages_mask.test(thread_numa_node));
+      return true;
+    }
+
+    /* allocate new page if needed */
+    if (block->shared_pages[thread_numa_node] == nullptr) {
+      /* DEFAULT_NUMA_NODE is allocated by mmap when init chunk*/
+      byte *new_page = nullptr;
+      ut_ad(!block->shared_pages_mask.test(thread_numa_node)
+              || block->shared_pages[thread_numa_node] != nullptr);
+      ut_a(thread_numa_node != DEFAULT_NUMA_NODE);
+#if defined (HAVE_LIBNUMA)
+      ut_ad(numa_available() > 0);
+      new_page = static_cast<byte *>(
+                  numa_alloc_onnode(page.size.physical(), thread_numa_node)
+                );
+      ut_a(new_page);
+      block->shared_pages[thread_numa_node] = new_page;
+#else
+      return false;
+#endif
+    }
+    
+    /* copy page if needed */
+    if (!block->shared_pages_mask.test(thread_numa_node)) {
+      memcpy(block->shared_pages[thread_numa_node], 
+          block->frame, page.size.physical());
+      block->shared_pages_mask.set(thread_numa_node);
+    }
+
+    if (page.buf_fix_count.load() <= 1) {
+      block->real_frame = block->shared_pages[thread_numa_node];
+      block->frame_position = thread_numa_node;
+    }
+    
+    return true;
+}
+
+static void make_page_exclusive(buf_block_t *block) {
+  ut_ad(rw_lock_own(&block->lock, RW_SX_LATCH)
+        || rw_lock_own(&block->lock, RW_X_LATCH)
+        || rw_lock_own(&block->lock, RW_NO_LATCH));
+  ut_ad(thread_numa_node >= 0 && thread_numa_node < MAX_SUPPORT_NUMA_NODES);
+  if (!block->page.page_shred) {
+    return;
+  }
+
+  /* use local page first, if not, select any avaliable page */
+  int target_numa_node = 0;
+  if (block->shared_pages_mask.test(thread_numa_node)) {
+    ut_ad(block->shared_pages[thread_numa_node]);
+    target_numa_node = 1;
+  } else {
+    for (int i = 0; i < MAX_SUPPORT_NUMA_NODES; i++) {
+      if (block->shared_pages_mask.test(i)) {
+        ut_a(block->shared_pages[i]);
+        target_numa_node = i;
+        break;
+      }
+    }
+  }
+
+  /* disable shared pages */
+  for (int i = 0; i < MAX_SUPPORT_NUMA_NODES; i++) {
+    if (i != target_numa_node && block->shared_pages[i] != nullptr) {
+      block->shared_pages_mask.reset(i);
+    }
+  }
+
+  /* we have already get latch before, so we can use relaxed here*/
+  block->real_frame = block->shared_pages[target_numa_node];
+  block->frame_position = target_numa_node;
+  block->page.page_shred = false;
+}
+
 #ifndef UNIV_HOTBACKUP
 const std::unordered_map<buf_io_fix, std::string_view> buf_io_fix_str{
     {BUF_IO_NONE, "BUF_IO_NONE"},
@@ -855,7 +1020,7 @@ static void buf_block_init(
   buf_pool_resize(). Either way, adaptive hash index must not exist. */
   block->ahi.assert_empty_on_init();
 
-  block->frame = frame;
+  block->real_frame = frame;
 
   block->page.buf_pool_index = buf_pool_index(buf_pool);
   block->page.state = BUF_BLOCK_NOT_USED;
@@ -864,6 +1029,7 @@ static void buf_block_init(
   block->page.reset_flush_observer();
   block->page.m_space = nullptr;
   block->page.m_version = 0;
+  block->page.page_shred = false;
 
   block->modify_clock = 0;
 
@@ -871,6 +1037,12 @@ static void buf_block_init(
 
   block->ahi.index = nullptr;
   block->made_dirty_with_no_latch = false;
+
+  if (srv_page_shared) {
+    memset(block->shared_pages, 0, sizeof (block->shared_pages));
+    block->shared_pages[DEFAULT_NUMA_NODE] = frame;
+    block->frame_position = 0;
+  }
 
   ut_d(block->page.in_page_hash = false);
   ut_d(block->page.in_zip_hash = false);
@@ -1008,9 +1180,34 @@ bool buf_pool_t::allocate_chunk(ulonglong mem_size, buf_chunk_t *chunk) {
                "MPOL_MF_MOVE", strerror(errno));
     }
     numa_bitmask_free(numa_nodes);
+  } else if (srv_page_shared) {
+    const auto low_level_info = ut::large_page_low_level_info(
+        chunk->mem, ut::fallback_to_normal_page_t{});
+    struct bitmask *numa_nodes = numa_get_mems_allowed();
+    numa_bitmask_clearall(numa_nodes);
+    numa_bitmask_setbit(numa_nodes, DEFAULT_NUMA_NODE);
+    int st = mbind(low_level_info.base_ptr, low_level_info.allocation_size,
+                   MPOL_BIND, numa_nodes->maskp, numa_nodes->size,
+                   MPOL_MF_STRICT | MPOL_MF_MOVE);
+    if (st != 0) {
+      ib::warn(ER_IB_MSG_54, low_level_info.base_ptr,
+               low_level_info.allocation_size, "MPOL_INTERLEAVE",
+               "MPOL_MF_MOVE", strerror(errno));
+    }
+    numa_bitmask_free(numa_nodes);
   }
 #endif /* HAVE_LIBNUMA */
-
+#ifndef HAVE_LIBNUMA
+  /* mock mode*/
+  if (srv_page_shared) {
+    const auto low_level_info = ut::large_page_low_level_info(
+        chunk->mem, ut::fallback_to_normal_page_t{});
+    if (madvise(low_level_info.base_ptr, low_level_info.allocation_size,
+                MADV_RANDOM)) {
+      ib::warn()
+                }
+  }
+#endif
   return true;
 }
 
@@ -1591,6 +1788,10 @@ dberr_t buf_pool_init(ulint total_size, ulint n_instances) {
 #endif /* UNIV_LINUX */
 
   dberr_t err = DB_SUCCESS;
+
+  if (srv_numa_interleave && srv_page_shared) {
+    return DB_ERROR;
+  }
 
   for (i = 0; i < n_instances; /* no op */) {
     ulint n = i + n_cores;
@@ -4197,17 +4398,22 @@ void Buf_fetch<T>::mtr_add_page(buf_block_t *block) {
     case RW_NO_LATCH:
 
       fix_type = MTR_MEMO_BUF_FIX;
+      if (!m_dirty_with_no_latch) {
+        try_make_page_shared(block);
+      }
       break;
 
     case RW_S_LATCH:
       rw_lock_s_lock_gen(&block->lock, 0, loc);
       fix_type = MTR_MEMO_PAGE_S_FIX;
+      try_make_page_shared(block);
       break;
 
     case RW_SX_LATCH:
       rw_lock_sx_lock_gen(&block->lock, 0, loc);
 
       fix_type = MTR_MEMO_PAGE_SX_FIX;
+      make_page_exclusive(block);
       break;
 
     default:
@@ -4215,6 +4421,7 @@ void Buf_fetch<T>::mtr_add_page(buf_block_t *block) {
       rw_lock_x_lock_gen(&block->lock, 0, loc);
 
       fix_type = MTR_MEMO_PAGE_X_FIX;
+      make_page_exclusive(block);
       break;
   }
 
@@ -4522,6 +4729,10 @@ buf_block_t *buf_page_get_gen(const page_id_t &page_id,
 
   ut_ad(!found || page_size.equals_to(space_page_size));
 #endif /* UNIV_DEBUG */
+
+  if (srv_page_shared) {
+    bind_thread_numa_once();
+  }
 
   if (mode == Page_fetch::NORMAL && !fsp_is_system_temporary(page_id.space())) {
     Buf_fetch_normal fetch(page_id, page_size);
